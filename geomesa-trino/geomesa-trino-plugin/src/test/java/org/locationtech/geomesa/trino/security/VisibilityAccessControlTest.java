@@ -98,6 +98,31 @@ class VisibilityAccessControlTest {
     }
 
     @Test
+    void observedViewIsNotFiltered() {
+        // A view carries no __vis__ column of its own; it is recorded as a view at
+        // analysis time (getView/getViews) so it is NOT fail-closed. Its expanded
+        // base-table scans are filtered in their own right.
+        GeoMesaColumnCatalog cat = new GeoMesaColumnCatalog();
+        cat.recordView(TABLE);
+        assertThat(control(cat).getRowFilters(ctx("alice"), TABLE)).isEmpty();
+    }
+
+    @Test
+    void observedTableWinsOverStaleSameNameViewRecord() {
+        // If a name is somehow recorded as BOTH a view and (later) a vis-bearing
+        // table — e.g. a view dropped and a table recreated at the same name — the
+        // live table observation must win: the row filter is still emitted, so a
+        // view can never be used to launder past a table's visibility filter.
+        GeoMesaColumnCatalog cat = new GeoMesaColumnCatalog();
+        cat.recordView(TABLE);
+        cat.recordVisibilityColumn(TABLE, Set.of("__fid__", "geom", "__vis__"));
+        List<ViewExpression> filters = control(cat).getRowFilters(ctx("alice"), TABLE);
+        assertThat(filters).hasSize(1);
+        assertThat(filters.get(0).getExpression())
+            .isEqualTo("is_visible(\"__vis__\", 'basic,privileged')");
+    }
+
+    @Test
     void informationSchemaTableEmitsNoFilter() {
         // Metadata table reached unobserved → must NOT be filtered (else SHOW
         // TABLES / information_schema would be emptied).

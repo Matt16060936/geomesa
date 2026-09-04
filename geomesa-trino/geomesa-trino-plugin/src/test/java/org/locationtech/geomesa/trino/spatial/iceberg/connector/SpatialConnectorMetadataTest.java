@@ -551,4 +551,69 @@ class SpatialConnectorMetadataTest {
         assertThat(SpatialConnectorMetadata.pruneSafeLowerBound(116.5)).isEqualTo(116.5f);
         assertThat(SpatialConnectorMetadata.pruneSafeUpperBound(116.5)).isEqualTo(116.5f);
     }
+
+    // ── View-ness recording: keeps VisibilityAccessControl from fail-closing views ──
+
+    private static ConnectorViewDefinition viewDef() {
+        return new ConnectorViewDefinition(
+            "SELECT 1 AS a",
+            Optional.of("spatial_iceberg"),
+            Optional.of("s"),
+            List.of(new ConnectorViewDefinition.ViewColumn(
+                "a", BigintType.BIGINT.getTypeId(), Optional.empty())),
+            Optional.empty(),   // comment
+            Optional.empty(),   // runAsIdentity
+            true,               // runAsInvoker
+            List.of());         // path
+    }
+
+    /** Delegate that reports a single view at {@code s.a_view}. */
+    private static class ViewReportingMetadata extends FakeMetadata {
+        private final SchemaTableName viewName = new SchemaTableName("s", "a_view");
+
+        @Override
+        public Optional<ConnectorViewDefinition> getView(ConnectorSession session,
+                                                         SchemaTableName name) {
+            return name.equals(viewName) ? Optional.of(viewDef()) : Optional.empty();
+        }
+
+        @Override
+        public Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session,
+                                                                      Optional<String> schemaName) {
+            return Map.of(viewName, viewDef());
+        }
+    }
+
+    @Test
+    void getViewRecordsViewnessIntoCatalog() {
+        ViewReportingMetadata delegate = new ViewReportingMetadata();
+        GeoMesaColumnCatalog catalog = freshCatalog();
+        SpatialConnectorMetadata meta = new SpatialConnectorMetadata(delegate, catalog);
+        SchemaTableName view = new SchemaTableName("s", "a_view");
+
+        assertThat(catalog.isObservedView(view)).isFalse();
+        assertThat(meta.getView(null, view)).isPresent();
+        assertThat(catalog.isObservedView(view)).isTrue();
+    }
+
+    @Test
+    void getViewDoesNotRecordAbsentView() {
+        ViewReportingMetadata delegate = new ViewReportingMetadata();
+        GeoMesaColumnCatalog catalog = freshCatalog();
+        SpatialConnectorMetadata meta = new SpatialConnectorMetadata(delegate, catalog);
+        SchemaTableName notAView = new SchemaTableName("s", "not_a_view");
+
+        assertThat(meta.getView(null, notAView)).isEmpty();
+        assertThat(catalog.isObservedView(notAView)).isFalse();
+    }
+
+    @Test
+    void getViewsRecordsAllListedViewsIntoCatalog() {
+        ViewReportingMetadata delegate = new ViewReportingMetadata();
+        GeoMesaColumnCatalog catalog = freshCatalog();
+        SpatialConnectorMetadata meta = new SpatialConnectorMetadata(delegate, catalog);
+
+        meta.getViews(null, Optional.of("s"));
+        assertThat(catalog.isObservedView(new SchemaTableName("s", "a_view"))).isTrue();
+    }
 }

@@ -92,6 +92,15 @@ public final class GeoMesaColumnCatalog {
      */
     private final Cache<SchemaTableName, ObservedVisibility> visColumns;
 
+    /** Names observed to be views (not base tables), recorded at analysis time by
+     *  {@code SpatialConnectorMetadata.getView}/{@code getViews} and read by the
+     *  Trino-layer {@link org.locationtech.geomesa.trino.security.VisibilityAccessControl}
+     *  so a view relation is not fail-closed. A view carries no {@code __vis__}
+     *  column of its own; its expanded base-table scans are visibility-filtered
+     *  in their own right. Same longer retention as {@link #visColumns} so the
+     *  analysis-time write survives to the same query's row-filter read. */
+    private final Cache<SchemaTableName, Boolean> views;
+
     /**
      * Creates a catalog with the default TTL and system clock.
      */
@@ -111,6 +120,10 @@ public final class GeoMesaColumnCatalog {
             .ticker(ticker)
             .build();
         this.visColumns = CacheBuilder.newBuilder()
+            .expireAfterWrite(Duration.ofNanos(VIS_RETENTION_TTL_MULTIPLE * ttlNanos))
+            .ticker(ticker)
+            .build();
+        this.views = CacheBuilder.newBuilder()
             .expireAfterWrite(Duration.ofNanos(VIS_RETENTION_TTL_MULTIPLE * ttlNanos))
             .ticker(ticker)
             .build();
@@ -164,6 +177,29 @@ public final class GeoMesaColumnCatalog {
         return Optional.ofNullable(visColumns.getIfPresent(tableName));
     }
 
+    /** Records that a name resolves to a view, detected at analysis time by
+     *  {@code SpatialConnectorMetadata.getView}/{@code getViews}. Views carry no
+     *  {@code __vis__} column and must not be fail-closed by the access control;
+     *  their expanded base-table scans are filtered on their own.
+     *
+     * @param viewName the schema-qualified view name
+     */
+    public void recordView(SchemaTableName viewName) {
+        views.put(viewName, Boolean.TRUE);
+    }
+
+    /** Whether a name has been observed to be a view. A table observation always
+     *  takes precedence at the call site: a real {@code __vis__} table is observed
+     *  via {@code getColumnHandles} on every query, so a stale same-name view record
+     *  can never suppress a live table's row filter.
+     *
+     * @param name the schema-qualified name
+     * @return true if the name was observed to be a view
+     */
+    public boolean isObservedView(SchemaTableName name) {
+        return Boolean.TRUE.equals(views.getIfPresent(name));
+    }
+
     /** Drops all cached state for a table. Called when forwarded DDL removes or
      *  renames it, so a later table at the same name re-discovers its geometry
      *  and visibility columns instead of being served stale descriptors.
@@ -173,6 +209,7 @@ public final class GeoMesaColumnCatalog {
     public void invalidate(SchemaTableName tableName) {
         cache.invalidate(tableName);
         visColumns.invalidate(tableName);
+        views.invalidate(tableName);
     }
 
     /** Drops cached state for every table in a schema. Called when forwarded DDL
@@ -183,6 +220,7 @@ public final class GeoMesaColumnCatalog {
     public void invalidateSchema(String schemaName) {
         cache.asMap().keySet().removeIf(tn -> tn.getSchemaName().equals(schemaName));
         visColumns.asMap().keySet().removeIf(tn -> tn.getSchemaName().equals(schemaName));
+        views.asMap().keySet().removeIf(tn -> tn.getSchemaName().equals(schemaName));
     }
 
     /** {@code __vis__} when present, else empty. */

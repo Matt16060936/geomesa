@@ -86,6 +86,16 @@ public final class VisibilityAccessControl extends AllowAllAccessControl {
         }
         Optional<GeoMesaColumnCatalog.ObservedVisibility> observed =
             geomCatalog.visibilityColumn(table);
+        // A view carries no __vis__ column of its own; visibility is enforced on the
+        // base-table scans its body expands to (each observed via getColumnHandles and
+        // filtered in its own right). Skip the view relation so it is not fail-closed to
+        // zero rows. Checked only when the name was NOT observed as a base table: a real
+        // __vis__ table is observed via getColumnHandles on every query, so a live table
+        // always wins over any stale same-name view record — a view cannot be used to
+        // launder past a table's row filter.
+        if (observed.isEmpty() && geomCatalog.isObservedView(table)) {
+            return List.of();
+        }
         if (observed.isEmpty()) {
             // A real data table reached row-filter analysis without first being
             // observed via getColumnHandles (e.g. an unexpected planner path or

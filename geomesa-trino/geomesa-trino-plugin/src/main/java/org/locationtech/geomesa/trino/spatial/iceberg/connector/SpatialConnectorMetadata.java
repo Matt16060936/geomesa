@@ -1266,7 +1266,16 @@ public class SpatialConnectorMetadata implements ConnectorMetadata {
     @Override
     public Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session,
                                                                   Optional<String> schemaName) {
-        return delegate.getViews(session, schemaName);
+        Map<SchemaTableName, ConnectorViewDefinition> views = delegate.getViews(session, schemaName);
+        // Record view-ness at analysis time so the Trino-layer VisibilityAccessControl
+        // (which sees only a SchemaTableName) does not fail-close a view relation.
+        // Best-effort: never let bookkeeping break view listing.
+        try {
+            views.keySet().forEach(geomCatalog::recordView);
+        } catch (RuntimeException e) {
+            LOG.debug("Could not record views: {}", e.getMessage());
+        }
+        return views;
     }
 
     /**
@@ -1291,7 +1300,18 @@ public class SpatialConnectorMetadata implements ConnectorMetadata {
     @Override
     public Optional<ConnectorViewDefinition> getView(ConnectorSession session,
                                                      SchemaTableName viewName) {
-        return delegate.getView(session, viewName);
+        Optional<ConnectorViewDefinition> view = delegate.getView(session, viewName);
+        // Record view-ness at analysis time so the Trino-layer VisibilityAccessControl
+        // (which sees only a SchemaTableName) does not fail-close this view relation.
+        // Best-effort: never let bookkeeping break view resolution.
+        if (view.isPresent()) {
+            try {
+                geomCatalog.recordView(viewName);
+            } catch (RuntimeException e) {
+                LOG.debug("Could not record view {}: {}", viewName, e.getMessage());
+            }
+        }
+        return view;
     }
 
     /**
@@ -1543,6 +1563,10 @@ public class SpatialConnectorMetadata implements ConnectorMetadata {
     @Override
     public void dropView(ConnectorSession session, SchemaTableName viewName) {
         delegate.dropView(session, viewName);
+        // Drop the view record so a later table at the same name is not mistaken
+        // for a view (it would re-observe as a table via getColumnHandles anyway,
+        // but invalidate eagerly to match dropTable's contract).
+        geomCatalog.invalidate(viewName);
     }
 
     /**
@@ -1555,6 +1579,8 @@ public class SpatialConnectorMetadata implements ConnectorMetadata {
     @Override
     public void renameView(ConnectorSession session, SchemaTableName source, SchemaTableName target) {
         delegate.renameView(session, source, target);
+        geomCatalog.invalidate(source);
+        geomCatalog.invalidate(target);
     }
 
     /**

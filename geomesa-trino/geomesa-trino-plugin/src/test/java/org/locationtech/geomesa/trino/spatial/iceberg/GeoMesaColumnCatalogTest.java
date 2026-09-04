@@ -182,4 +182,60 @@ class GeoMesaColumnCatalogTest {
 
         assertThat(catalog.visibilityColumn(live).orElseThrow().column()).contains("__vis__");
     }
+
+    // -----------------------------------------------------------------------
+    // View records: keep the access control from fail-closing a view relation
+    // -----------------------------------------------------------------------
+
+    @Test
+    void recordViewIsObservedAndUnrecordedNamesAreNot() {
+        GeoMesaColumnCatalog catalog = new GeoMesaColumnCatalog();
+        SchemaTableName view = new SchemaTableName("s", "a_view");
+        SchemaTableName other = new SchemaTableName("s", "not_a_view");
+
+        assertThat(catalog.isObservedView(view)).isFalse();
+        catalog.recordView(view);
+        assertThat(catalog.isObservedView(view)).isTrue();
+        // Recording one name doesn't mark another.
+        assertThat(catalog.isObservedView(other)).isFalse();
+    }
+
+    @Test
+    void viewRecordsExpireForViewsDroppedOutsideForwardedDdl() {
+        long ttl = Duration.ofMinutes(5).toNanos();
+        AtomicLong clock = new AtomicLong(0);
+        GeoMesaColumnCatalog catalog = new GeoMesaColumnCatalog(ttl, clock::get);
+        SchemaTableName view = new SchemaTableName("s", "dropped_view");
+        catalog.recordView(view);
+        assertThat(catalog.isObservedView(view)).isTrue();
+
+        // Past the retention window with no refresh (view dropped via the plain
+        // iceberg catalog, so no invalidate() ran).
+        clock.addAndGet(GeoMesaColumnCatalog.VIS_RETENTION_TTL_MULTIPLE * ttl + 1);
+
+        assertThat(catalog.isObservedView(view)).isFalse();
+    }
+
+    @Test
+    void invalidateClearsViewRecord() {
+        GeoMesaColumnCatalog catalog = new GeoMesaColumnCatalog();
+        SchemaTableName view = new SchemaTableName("s", "v");
+        catalog.recordView(view);
+        catalog.invalidate(view);
+        assertThat(catalog.isObservedView(view)).isFalse();
+    }
+
+    @Test
+    void invalidateSchemaClearsViewRecordsInThatSchema() {
+        GeoMesaColumnCatalog catalog = new GeoMesaColumnCatalog();
+        SchemaTableName inS = new SchemaTableName("s", "v");
+        SchemaTableName inOther = new SchemaTableName("other", "v");
+        catalog.recordView(inS);
+        catalog.recordView(inOther);
+
+        catalog.invalidateSchema("s");
+
+        assertThat(catalog.isObservedView(inS)).isFalse();
+        assertThat(catalog.isObservedView(inOther)).isTrue();
+    }
 }
